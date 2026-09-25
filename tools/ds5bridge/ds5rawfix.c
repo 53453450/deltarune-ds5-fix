@@ -38,6 +38,8 @@
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <mach/vm_region.h>
 #include <mach/mach_time.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -186,6 +188,20 @@ static void my_IOHIDDeviceRegisterInputValueCallback(IOHIDDeviceRef device,
 static int g_hooked = 0;
 static int g_patched_slots = 0;
 
+/* 取某地址所在内存区域的当前保护位 */
+static vm_prot_t page_protection(vm_address_t addr) {
+    mach_vm_address_t a = (mach_vm_address_t)addr;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    kern_return_t kr = mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64,
+                                      (vm_region_info_t)&info, &count, &object);
+    if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+    if (kr != KERN_SUCCESS) return VM_PROT_READ | VM_PROT_WRITE;
+    return info.protection;
+}
+
 static void patch_sect(const struct mach_header_64 *hdr, const char *seg, const char *sect,
                        void *target, void *replacement) {
     unsigned long sz = 0;
@@ -194,6 +210,13 @@ static void patch_sect(const struct mach_header_64 *hdr, const char *seg, const 
 
     vm_address_t page = (vm_address_t)slots & ~(vm_address_t)(vm_page_size - 1);
     vm_size_t span = (vm_address_t)slots + sz - page;
+
+    /* ⚠️ 必须原样恢复原始保护位，绝不能一律设成只读：
+       __la_symbol_ptr 位于 __DATA 段，同页还有 __data/__bss；
+       恢复只读会让运行时的全局变量写入触发 SIGBUS。
+       （实测：游戏在 GamepadInitM -> EnumerateGamepads 写 __bss 时崩溃） */
+    vm_prot_t orig = page_protection(page);
+
     kern_return_t kr = vm_protect(mach_task_self(), page, span, 0,
                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
 
@@ -208,10 +231,11 @@ static void patch_sect(const struct mach_header_64 *hdr, const char *seg, const 
     if (local) {
         sys_icache_invalidate((void *)page, span);
         g_patched_slots += local;
-        logline("[ds5rawfix] 改写 %s,%s 槽位 %d 个 (vm_protect=0x%x)", seg, sect, local, kr);
+        logline("[ds5rawfix] 改写 %s,%s 槽位 %d 个 (prot 0x%x -> 恢复 0x%x)",
+                seg, sect, local, (unsigned)kr, (unsigned)orig);
     }
     if (kr == KERN_SUCCESS)
-        vm_protect(mach_task_self(), page, span, 0, VM_PROT_READ);
+        vm_protect(mach_task_self(), page, span, 0, orig);
 }
 
 static void install_hook(void) {
