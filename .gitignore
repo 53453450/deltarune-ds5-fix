@@ -15,3 +15,15 @@ __pycache__/
 .vscode/
 .idea/
 *.swp
+
+# 探针编译产物（源码在 tools/probes/，编译后同名可执行文件不入库）
+tools/probes/hidprobe
+tools/probes/hidprobe2
+tools/probes/hidlist
+tools/probes/hidorder
+tools/probes/hidbtn
+tools/probes/rawdump
+tools/probes/rawcal
+tools/probes/rawcal2
+tools/probes/vdev
+tools/probes/vsub
