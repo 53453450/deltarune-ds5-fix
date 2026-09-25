@@ -79,8 +79,23 @@ DualSense 的 HID 描述符把面键按 `□ ✕ ◯ △` 排列（UsagePage `0x
     README.md
     gamecontrollerdb.txt          可安装的映射（3 条：USB v0x0100 / USB v0 / BT name-fallback）
     install.sh                    安装 / 回滚到存档目录
-    docs/DS5_诊断报告.md          完整取证报告（证据链 + 反汇编片段）
+    docs/DS5_诊断报告.md          完整取证报告（证据链 + 反汇编片段 + 第 7 章蓝牙专章）
     tools/find_xref.py            反汇编 rip-relative 交叉引用查找器（按内容匹配定位字符串引用）
+    tools/probes/                 复现探针源码（见下）
+
+### 探针
+
+| 文件 | 用途 |
+|---|---|
+| `hidprobe.c` | 匹配 + `IOHIDDeviceOpen` + 按钮元素计数 |
+| `hidprobe2.c` | 输入通路存活判定（元素值快照对比，不需要人按键） |
+| `hidlist.c` | 导出「运行时视角」的元素索引表（按 `type∈{1,2,3}` ∧ `page∈1..12` 过滤） |
+| `hidorder.c` | A/B 复现运行时的 IOKit 调用顺序（`hidorder runner` / `canonical`） |
+| `hidbtn.c` | 按钮/轴事件记录，判定事件是否送达第三方 HID 客户端 |
+
+编译（只需 Xcode Command Line Tools）：
+
+    clang -framework IOKit -framework CoreFoundation -o hidbtn tools/probes/hidbtn.c
 
 ## 环境
 
@@ -89,12 +104,28 @@ DualSense 的 HID 描述符把面键按 `□ ✕ ◯ △` 排列（UsagePage `0x
   `Developer ID Application: Robert Fox (UY9XU99VUC)`，Hardened Runtime + 公证已 staple
 - 映射表规模：156 条 `platform:Mac OS X`；Sony 条目 4 条（PS3 / PS4 v1 / DS4 v2 / DS4 无线适配器），DualSense 0 条
 
-## 未验证
+## 未验证 / 已知缺口
 
-- **蓝牙**：仅补了名称型 fallback 条目，未坐实蓝牙态下运行时能否枚举到该设备。
-  需在蓝牙连接状态下重跑 `ioreg -r -c IOHIDDevice`，对比 `PrimaryUsage` 与按钮顺序。
-- macOS 上若改用 Steam Input 虚拟手柄（`Steam Virtual GamePad`），该条目在运行时映射表中**已存在且正确**，
-  但本补丁与其叠加时的行为未测。
+### 蓝牙下完全没有响应（详见 `docs/DS5_诊断报告.md` 第 7 章）
+
+系统侧已全面排除：设备匹配、打开、上报、元素索引空间、计数与填充一致性、运行时 IOKit 调用
+顺序竞态、崩溃报告、本补丁文件的影响——**全部实测否掉**；同期另一款游戏（Control）蓝牙下操作正常。
+
+300 秒监听窗口的实测结果：**按钮事件 0 条**，vendor 页事件 19130 条（~64/秒）。
+即上报在流，但没有按钮元素的 value 变化送达第三方 HID 客户端。
+
+待验证假设：HIDAPI 系游戏读**原始输入报文**，GameMaker 运行时读**元素值回调**，
+而 macOS 为蓝牙 DualSense 创建的 `IOHIDUserDevice` 桥接层可能只接了部分元素。
+
+验证命令（需实际按键）：
+
+    ./hidbtn 60
+
+### 其他
+
+- macOS 上若改用 Steam Input 虚拟手柄（`Steam Virtual GamePad`），该条目在运行时映射表中**已存在且正确**
+  （`030000005e0400008e02000001000000`, `a:b0,b:b1,x:b2,y:b3`），但本补丁与其叠加时的行为未测。
+- 蓝牙下轴顺序与 USB 不同（`X Y Z Rz Hat Rx Ry`），因此本补丁的 `rightx:a4, righty:a5` 只对 USB 正确。
 
 ## 免责
 
