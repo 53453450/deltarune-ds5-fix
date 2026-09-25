@@ -1,5 +1,7 @@
 # DELTARUNE (macOS) DualSense 手柄支持诊断报告
 
+**中文** | [English](DS5_diagnosis_report.md)
+
 - 目标：DELTARUNE.app（Steam AppID 1671210），GameMaker Studio 2 (`Mac_Runner`) 导出
 - 设备：Sony DualSense Wireless Controller，VID `0x054C` / PID `0x0CE6`
 - 症状：有线下面键错位、蓝牙下完全无响应

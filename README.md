@@ -1,5 +1,7 @@
 # deltarune-ds5-fix
 
+**中文** | [English](README.en.md)
+
 DELTARUNE（macOS / GameMaker Studio 2）下 **DualSense (PS5) 手柄** 的支持修复。
 
 **有线（USB）** 与 **蓝牙** 是**两个互不相关的缺陷**，修复方式也完全不同：
@@ -202,10 +204,11 @@ Steam 会检测到哈希不符并重新下载原始文件（含原始 Developer 
 
 ## 目录结构
 
-    README.md
+    README.md / README.en.md         本说明（中文 / English）
     gamecontrollerdb.txt              有线修复：可安装的映射（3 条变体）
     install.sh                        有线修复：安装 / 回滚到存档目录
-    docs/DS5_诊断报告.md              根因与证据（含反汇编片段）
+    docs/DS5_诊断报告.md              根因与证据（中文）
+    docs/DS5_diagnosis_report.md      根因与证据（English）
     tools/find_xref.py                反汇编 rip-relative 交叉引用查找器
     tools/hid_report_binding.py       HID 元素/报文绑定诊断
     tools/probes/                     复现探针源码
