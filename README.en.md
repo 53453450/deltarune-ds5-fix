@@ -120,7 +120,50 @@ Implementation: [`tools/ds5bridge/ds5rawfix.c`](tools/ds5bridge/ds5rawfix.c)
 3. It additionally registers `IOHIDDeviceRegisterInputReportCallback` to parse 0x31 reports
 4. It only handles `reportID == 0x31`, so **USB is unaffected** (USB uses 0x01)
 
-Installation (already performed):
+#### Building
+
+A prebuilt `libDS5RawFix.dylib` is included; rebuild it after changing the source:
+
+    cd tools/ds5bridge
+    clang -arch arm64 -arch x86_64 -dynamiclib -O2 -Wall \
+      -o libDS5RawFix.dylib ds5rawfix.c \
+      -framework IOKit -framework CoreFoundation \
+      -install_name @loader_path/libDS5RawFix.dylib
+
+What each flag is for:
+
+| Flag | Why it is needed |
+|---|---|
+| `-arch arm64 -arch x86_64` | The game is a universal binary, so both slices must be loadable |
+| `-dynamiclib` | Produce a dynamic library |
+| `-framework IOKit -framework CoreFoundation` | The only two frameworks used; no third-party dependencies |
+| `-install_name @loader_path/libDS5RawFix.dylib` | **Critical**: this is exactly the path written into `libYoYoGamepad.dylib` in the next step; the two must match or dyld will not find it |
+
+**No entitlements are required** — only the Xcode Command Line Tools.
+
+Verify the build:
+
+    file libDS5RawFix.dylib        # should list both x86_64 and arm64
+    otool -L libDS5RawFix.dylib    # first line should be @loader_path/libDS5RawFix.dylib
+
+After changing the source you must **redo the whole chain**: build → copy into the app bundle →
+`codesign --force --deep -s -` again. Skip the re-sign and the nested dylib's signature will no longer
+match the bundle seal, so it will be refused at load time.
+
+At runtime, check the log `/tmp/ds5rawfix.log`. A successful hook prints three lines:
+
+```
+[ds5rawfix] 目标镜像 .../Contents/Frameworks/libYoYoGamepad.dylib @ 0x...
+[ds5rawfix] 改写 __DATA,__la_symbol_ptr 槽位 1 个 (prot 0x0 -> 恢复 0x3)
+[ds5rawfix] 挂钩成功 dev=0x... ctx=0x... 按钮元素=14 轴元素=6 十字键元素=1
+```
+
+> The section name and protection value depend on the build: in the real game it is
+> `__DATA,__la_symbol_ptr` (RW at runtime, hence `0x3`), whereas the structurally identical test
+> stub uses `__DATA_CONST,__got` (dyld makes that read-only after fixups, hence `0x1`).
+> All four paths are attempted; which one hits depends on how that library was linked.
+
+#### Installation (already performed)
 
     # 1. copy the dylib into the app bundle
     cp tools/ds5bridge/libDS5RawFix.dylib \

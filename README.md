@@ -115,7 +115,48 @@ DualSense 的 HID 描述符把面键按 `□ ✕ ◯ △` 排列（UsagePage `0x
 3. 额外注册 `IOHIDDeviceRegisterInputReportCallback`，解析 0x31 报文
 4. 只处理 `reportID == 0x31`，**不影响 USB**（USB 走 0x01）
 
-安装过程（已执行完毕）：
+#### 编译
+
+仓库里已带编译好的 `libDS5RawFix.dylib`，自己改源码后重新编译：
+
+    cd tools/ds5bridge
+    clang -arch arm64 -arch x86_64 -dynamiclib -O2 -Wall \
+      -o libDS5RawFix.dylib ds5rawfix.c \
+      -framework IOKit -framework CoreFoundation \
+      -install_name @loader_path/libDS5RawFix.dylib
+
+各参数的作用：
+
+| 参数 | 为什么需要 |
+|---|---|
+| `-arch arm64 -arch x86_64` | 游戏是 universal 二进制，两个切片都得能加载 |
+| `-dynamiclib` | 产出动态库 |
+| `-framework IOKit -framework CoreFoundation` | 只依赖这两个框架，无第三方依赖 |
+| `-install_name @loader_path/libDS5RawFix.dylib` | **关键**：下一步插进 `libYoYoGamepad.dylib` 的依赖写的正是这个路径，两者必须一致，否则 dyld 找不到 |
+
+**不需要任何 entitlement**，只需要 Xcode Command Line Tools。
+
+编译完自检：
+
+    file libDS5RawFix.dylib        # 应显示 x86_64 与 arm64 两种架构
+    otool -L libDS5RawFix.dylib    # 第一行应为 @loader_path/libDS5RawFix.dylib
+
+改完源码后要**重走整条链**：编译 → 复制进 app 包 → 重新 `codesign --force --deep -s -`。
+少了重新签名这一步，嵌套 dylib 的签名会与包封不一致，加载会被拒。
+
+运行期自检看日志 `/tmp/ds5rawfix.log`，挂钩成功应有三行：
+
+```
+[ds5rawfix] 目标镜像 .../Contents/Frameworks/libYoYoGamepad.dylib @ 0x...
+[ds5rawfix] 改写 __DATA,__la_symbol_ptr 槽位 1 个 (prot 0x0 -> 恢复 0x3)
+[ds5rawfix] 挂钩成功 dev=0x... ctx=0x... 按钮元素=14 轴元素=6 十字键元素=1
+```
+
+> 节名与保护位随构建而异：实测游戏里是 `__DATA,__la_symbol_ptr`（运行期 RW，故恢复 `0x3`），
+> 而结构相同的测试桩里是 `__DATA_CONST,__got`（dyld 在 fixup 后把它设为只读，恢复 `0x1`）。
+> 四条路径都会尝试，命中哪条取决于该库的链接方式。
+
+#### 安装过程（已执行完毕）
 
     # 1. 复制 dylib 到 app 包
     cp tools/ds5bridge/libDS5RawFix.dylib \
