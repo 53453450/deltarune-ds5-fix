@@ -1,0 +1,45 @@
+# DualSense (PS5) 映射补齐 —— GameMaker macOS 运行时
+#
+# 放置位置（按运行时查找顺序，第一个命中即用）：
+#   1) ~/Library/Application Support/com.tobyfox.deltarune/gamecontrollerdb.txt   <- 正式安装位置
+#   2) DELTARUNE.app/Contents/Resources/gamecontrollerdb.txt                      <- 备选（会破坏签名）
+#   3) 环境变量 SDL_GAMECONTROLLERCONFIG                                          <- 备选（追加而不是覆盖）
+#
+# 查找顺序来自 Mac_Runner 反汇编（gamepad 初始化函数）：
+#   SGamepadMapping::CreateFromFileAsString(内嵌 156 条)
+#   -> SaveFileExists("gamecontrollerdb.txt") ? ReadSaveFile : (BundleFileExists ? ReadBundleFile)
+#   -> SGamepadMapping::CreateFromFileAsString(读到的内容)
+#   -> EnvironmentGetVariable("SDL_GAMECONTROLLERCONFIG") -> CreateFromString(...)
+# 注意第一路走的是 LoadSave 的「存档区」，即 ~/Library/Application Support/<bundle id>/。
+#
+# GUID 由 libYoYoGamepad.dylib 现场计算，实测算法（反汇编 0x4bed-0x4cb6）：
+#   主分支（vendor 与 product 均非 0）：
+#     movl $0x3,    guid[0..3]    ; bus 硬编码 3 = USB
+#     movw vendor,  guid[4..5]    ; IOKit "VendorID"      小端
+#     movw $0,      guid[6..7]
+#     movw product, guid[8..9]    ; IOKit "ProductID"     小端
+#     movw $0,      guid[10..11]
+#     movw version, guid[12..13]  ; IOKit "VersionNumber" 小端
+#     movw $0,      guid[14..15]
+#   fallback（vendor==0 或 product==0，典型是蓝牙）：
+#     movl $0x5, guid[0..3]       ; bus = 5
+#     guid[4..15] = 设备名("Product")前 12 字节
+#
+# 本机设备实测（ioreg）：
+#   VendorID = 1356 (0x054C)   ProductID = 3302 (0x0CE6)
+#   VersionNumber = 256 (0x0100)   Product = "DualSense Wireless Controller"
+#
+# 按键枚举顺序实测自设备 HID 描述符（UsagePage=0x09，按元素出现顺序）：
+#   b0=□ b1=✕ b2=◯ b3=△ b4=L1 b5=R1 b6=L2 b7=R2
+#   b8=Create b9=Options b10=L3 b11=R3 b12=PS b13=Touchpad
+# 轴：a0=左X a1=左Y a2=Z(L2) a3=Rz(R2) a4=Rx(右X) a5=Ry(右Y)；十字键 h0
+
+# --- 主条目：USB / VersionNumber=0x0100（本机当前命中这条）---
+030000004c050000e60c000000010000,DualSense Wireless Controller,a:b1,b:b2,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b4,leftstick:b10,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b11,righttrigger:a3,rightx:a4,righty:a5,start:b9,touchpad:b13,x:b0,y:b3,platform:Mac OS X,
+
+# --- 同型号 VersionNumber=0x0000 的固件变体 ---
+030000004c050000e60c000000000000,DualSense Wireless Controller,a:b1,b:b2,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b4,leftstick:b10,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b11,righttrigger:a3,rightx:a4,righty:a5,start:b9,touchpad:b13,x:b0,y:b3,platform:Mac OS X,
+
+# --- Bluetooth fallback：bus=5 + 设备名前 12 字节 ---
+# "DualSense Wireless Controller" 的前 12 字节 = "DualSense Wi"
+050000004475616c53656e7365205769,DualSense Wireless Controller,a:b1,b:b2,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b4,leftstick:b10,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b11,righttrigger:a3,rightx:a4,righty:a5,start:b9,touchpad:b13,x:b0,y:b3,platform:Mac OS X,
