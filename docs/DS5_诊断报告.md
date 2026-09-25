@@ -356,6 +356,100 @@ GameMaker 运行时只用元素值回调，因此在蓝牙下彻底收不到输�
 | `hidbtn.c` | 按钮/轴事件记录（判定事件是否送达第三方进程）——**本案的定案证据** |
 | `tools/hid_report_binding.py`（仓库内） | 一键排查「元素声明在哪条 report vs 链路实际上行哪条 report」的错配 |
 
+---
+
+## 8. 修复路线评估：改 bundle 能修到什么程度
+
+### 8.1 路线一：自己发布一个健康的虚拟手柄 —— ❌ 不可行
+
+思路：注入代码读物理手柄的**原始报文**（这条路是通的），再以正确描述符重发布成
+`IOHIDUserDevice`，绕开 macOS 那个错配的桥接设备。
+
+实测挡在权限上：
+
+| 测试 | 结果 |
+|---|---|
+| 无 entitlement 调 `IOHIDUserDeviceCreate` | 安静返回 NULL |
+| 带 `com.apple.developer.hid.virtual.device` + ad-hoc 签名 | 进程被内核 **SIGKILL**（exit 137） |
+| 带无害 entitlement（`com.apple.security.cs.allow-jit`）+ ad-hoc 签名（对照组） | 正常运行 |
+
+⇒ 被杀**只因为** `com.apple.developer.hid.virtual.device` 这一个受限 entitlement。
+它需要 Apple 签发的 provisioning profile，自建工具拿不到。
+
+**关键对照**：本机 HID 树里存在两个 Valve（`0x28DE`）的 `IOHIDUserDevice` ——
+`Keyboard-1` / `Mouse-1`，由 Steam Input 的桌面配置发布。
+说明虚拟 HID 设备在 macOS 上**确实可行**，只是需要 Apple 授予的权限，Steam 有、我们没有。
+
+**推论：Steam Input 强制开启这条路线是真实可行的**（Steam 能造出健康虚拟手柄），
+而不是纯推测。风险仍是「游戏可能同时看到物理与虚拟两台设备、槽位顺序不定」。
+
+### 8.2 路线二：注入 dylib 直接驱动运行时内部状态 —— ⚠️ 可行但工程量大
+
+已把所需的全部反汇编信息挖齐：
+
+**注入点**（`libYoYoGamepad.dylib` 0x4d9c）：
+
+```asm
+leaq  _onGamepadValueChanged(%rip), %rsi
+movq  %r14, %rdi                     ; IOHIDDeviceRef
+movq  %r15, %rdx                     ; ← 第 3 参数 = GMGamePad 对象指针
+callq _IOHIDDeviceRegisterInputValueCallback
+```
+
+**设备对象（GMGamePad）布局**：
+
+| 偏移 | 含义 |
+|---|---|
+| `+0x28` | 映射条目指针（`FindFromGUID` 结果）|
+| `+0x30` | numButtons |
+| `+0x34` | numAxes |
+| `+0x38` | numHats |
+| `+0x40` | axisState（float[]，按轴序号）|
+| `+0x48` | buttonValue（float[]，按按钮序号）|
+| `+0x50` | hatState（int[]，值为 `g_masks[hatValue]`）|
+| `+0x58` | IOHIDDeviceRef |
+| `+0x60` | axes 数组（32 B/项，cookie 在 +0）|
+| `+0x68` | buttons 数组（8 B/项，cookie 在 +0）|
+| `+0x70` | hats 数组（8 B/项，cookie 在 +0）|
+
+**`_onGamepadValueChanged` 的写入规则**（0x5830–0x5a26）：
+
+- 轴：按 cookie 匹配 → `axisState[i] = (val - min) / (max - min) * 2 - 1`（min/max 动态跟踪，存在 axes[i]+8 / +0x10）
+- 按键：按 cookie 匹配 → `buttonValue[i] = (float)val`
+- 十字键：按 cookie 匹配 → `hatState[i] = g_masks[val - logicalMin]`
+
+**`g_masks`（arm64 分片，9 项）** = `[1, 3, 2, 6, 4, 12, 8, 9, 0]`
+即 hat 值 0..7 展开为位掩码，bit0=上、bit1=右、bit2=下、bit3=左，8=中立→0。
+
+**`gp_*` → 内部索引**（x86_64 分片，VA `0x7bc0`，16 项）：
+
+```
+face1..4 -> 0,1,2,3        shoulderl -> 4      shoulderlb -> 5
+shoulderr -> 0x5004(轴4)   shoulderrb -> 0x5005(轴5)
+select -> 8   start -> 9   stickl -> 10   stickr -> 11
+padu -> 12    padd -> 13   padl -> 14     padr -> 15
+```
+
+（`0x5000 | n` 表示「按轴 n 读取」，故肩键右/右扳机走模拟量。轴序：
+`gp_axislh..gp_axisrv` → 0..3，右扳机 → 4。）
+
+**实施代价**：
+
+1. 写 interpose dylib（`DYLD_INTERPOSE` 挂 `IOHIDDeviceRegisterInputValueCallback`，拿到 GMGamePad*），
+   额外注册 `IOHIDDeviceRegisterInputReportCallback`，解析 0x31/0x01 报文后写入上表各数组
+2. 必须**重新 ad-hoc 签名**整个 app（`--deep -s -`）—— 因为 hardened runtime 会
+   ①阻止 `DYLD_INSERT_LIBRARIES` ②做 library validation 拒绝加载被改过的 dylib
+3. 用 `Info.plist` 的 `LSEnvironment` 或 Steam 启动项注入 `DYLD_INSERT_LIBRARIES`
+
+**副作用**：丧失 Developer ID 签名与公证；重新启用 Gatekeeper 后将被拒绝启动。
+可用 Steam「验证文件完整性」恢复原状。
+
+### 8.3 建议顺序
+
+1. **先试 Steam Input 强制开启**（免费、1 分钟、且已有 Steam 自造虚拟设备的实证）。若槽位顺序出问题再往下走
+2. 仍不行再上 8.2 的注入方案（规格已备齐）
+3. 或者直接用有线
+
 
 ---
 
