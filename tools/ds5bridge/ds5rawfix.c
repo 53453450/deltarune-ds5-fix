@@ -32,6 +32,12 @@
 #include <IOKit/hid/IOHIDKeys.h>
 #include <IOKit/hid/IOHIDValue.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <dlfcn.h>
+#include <libkern/OSCacheControl.h>
+#include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
+#include <mach-o/loader.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -60,6 +66,7 @@ typedef struct {
     IOHIDElementRef btn[16]; /* page 9, usage 1..16 -> btn[usage-1] */
     IOHIDElementRef ax[6];   /* page 1, usage 0x30..0x35 -> ax[usage-0x30] */
     IOHIDElementRef hat;     /* page 1, usage 0x39 */
+    int registered;
     uint8_t rawbuf[256];
 } Slot;
 
@@ -166,32 +173,114 @@ static void on_raw(void *context, IOReturn result, void *sender, IOHIDReportType
 
 static void my_IOHIDDeviceRegisterInputValueCallback(IOHIDDeviceRef device,
                                                      IOHIDValueCallback callback,
+                                                     void *context);
+
+/* ------------------------------------------------------------------ *
+ * 挂钩方式：直接改写 libYoYoGamepad.dylib 的 __got 槽位
+ *
+ * 为什么不用 DYLD_INTERPOSE：dyld 只对「插入镜像」（DYLD_INSERT_LIBRARIES）
+ * 应用 __interpose 段；本 dylib 是以 LC_LOAD_DYLIB 依赖方式加载的，
+ * interpose 不会生效（实测对照确认）。故改为构造期改写目标镜像的 GOT。
+ * ------------------------------------------------------------------ */
+
+static int g_hooked = 0;
+static int g_patched_slots = 0;
+
+static void patch_sect(const struct mach_header_64 *hdr, const char *seg, const char *sect,
+                       void *target, void *replacement) {
+    unsigned long sz = 0;
+    intptr_t *slots = (intptr_t *)getsectiondata(hdr, seg, sect, &sz);
+    if (!slots || sz < sizeof(intptr_t)) return;
+
+    vm_address_t page = (vm_address_t)slots & ~(vm_address_t)(vm_page_size - 1);
+    vm_size_t span = (vm_address_t)slots + sz - page;
+    kern_return_t kr = vm_protect(mach_task_self(), page, span, 0,
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+
+    size_t n = sz / sizeof(intptr_t);
+    int local = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (slots[i] == (intptr_t)target) {
+            slots[i] = (intptr_t)replacement;
+            local++;
+        }
+    }
+    if (local) {
+        sys_icache_invalidate((void *)page, span);
+        g_patched_slots += local;
+        logline("[ds5rawfix] 改写 %s,%s 槽位 %d 个 (vm_protect=0x%x)", seg, sect, local, kr);
+    }
+    if (kr == KERN_SUCCESS)
+        vm_protect(mach_task_self(), page, span, 0, VM_PROT_READ);
+}
+
+static void install_hook(void) {
+    void *real = dlsym(RTLD_DEFAULT, "IOHIDDeviceRegisterInputValueCallback");
+    logline("[ds5rawfix] 原函数地址 = %p", real);
+    if (!real) return;
+    if ((void *)real == (void *)&my_IOHIDDeviceRegisterInputValueCallback) {
+        logline("[ds5rawfix] 符号已被替换为自己，跳过");
+        return;
+    }
+
+    uint32_t n = _dyld_image_count();
+    int hit = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (!nm || !strstr(nm, "libYoYoGamepad")) continue;
+        const struct mach_header *h = _dyld_get_image_header(i);
+        if (!h || h->magic != MH_MAGIC_64) {
+            logline("[ds5rawfix] %s 不是 64 位 mach-o，跳过", nm);
+            continue;
+        }
+        hit++;
+        logline("[ds5rawfix] 目标镜像 %s @ %p", nm, (void *)h);
+        const struct mach_header_64 *h64 = (const struct mach_header_64 *)h;
+        patch_sect(h64, "__DATA_CONST", "__got", real,
+                   (void *)&my_IOHIDDeviceRegisterInputValueCallback);
+        patch_sect(h64, "__DATA", "__got", real,
+                   (void *)&my_IOHIDDeviceRegisterInputValueCallback);
+        patch_sect(h64, "__DATA", "__la_symbol_ptr", real,
+                   (void *)&my_IOHIDDeviceRegisterInputValueCallback);
+        patch_sect(h64, "__AUTH_CONST", "__auth_got", real,
+                   (void *)&my_IOHIDDeviceRegisterInputValueCallback);
+    }
+    if (!hit) logline("[ds5rawfix] !! 未找到 libYoYoGamepad 镜像（共 %u 个镜像）", n);
+    else logline("[ds5rawfix] 完成，共改写 %d 个槽位", g_patched_slots);
+}
+
+static void my_IOHIDDeviceRegisterInputValueCallback(IOHIDDeviceRef device,
+                                                     IOHIDValueCallback callback,
                                                      void *context) {
-    /* 直接按名字调用原实现。dyld 的 interpose 不会重定向「插入镜像自身」的调用，
-       因此这里是原函数，不会递归。
-       ⚠️ 绝不要用 dlsym(RTLD_NEXT, ...) —— interpose 生效后它会返回本函数自身，
-          导致无限递归（实测 SIGSEGV / 栈溢出）。 */
+    if (g_hooked) return;   /* 防重入 */
+    g_hooked = 1;
+
+    /* 直接按名字调用原实现（本镜像的绑定指向 IOKit，不会递归） */
     IOHIDDeviceRegisterInputValueCallback(device, callback, context);
 
-    if (g_disabled) return;
-    if (!callback) return;
-    if (!slot_for(device)) {
-        if (g_nslot >= MAXDEV) return;
-        Slot *ns = &g_slots[g_nslot++];
-        memset(ns, 0, sizeof(*ns));
-        ns->dev = device;
-        build_elements(ns);
-        int nb = 0, na = 0;
-        for (int i = 0; i < 16; i++) if (ns->btn[i]) nb++;
-        for (int i = 0; i < 6; i++) if (ns->ax[i]) na++;
-        logline("[ds5rawfix] 挂钩 dev=%p ctx=%p 按钮元素=%d 轴元素=%d 十字键元素=%d",
-                (void *)device, context, nb, na, ns->hat ? 1 : 0);
-    }
+    if (g_disabled || !callback) { g_hooked = 0; return; }
+
     Slot *s = slot_for(device);
-    if (!s) return;
+    if (!s) {
+        if (g_nslot >= MAXDEV) { g_hooked = 0; return; }
+        s = &g_slots[g_nslot++];
+        memset(s, 0, sizeof(*s));
+        s->dev = device;
+        build_elements(s);
+        int nb = 0, na = 0;
+        for (int i = 0; i < 16; i++) if (s->btn[i]) nb++;
+        for (int i = 0; i < 6; i++) if (s->ax[i]) na++;
+        logline("[ds5rawfix] 挂钩成功 dev=%p ctx=%p 按钮元素=%d 轴元素=%d 十字键元素=%d",
+                (void *)device, context, nb, na, s->hat ? 1 : 0);
+    }
     s->cb = callback;
     s->ctx = context;
-    IOHIDDeviceRegisterInputReportCallback(device, s->rawbuf, sizeof(s->rawbuf), on_raw, NULL);
+    if (!s->registered) {
+        s->registered = 1;
+        IOHIDDeviceRegisterInputReportCallback(device, s->rawbuf, sizeof(s->rawbuf),
+                                               on_raw, NULL);
+    }
+    g_hooked = 0;
 }
 
 DYLD_INTERPOSE(my_IOHIDDeviceRegisterInputValueCallback,
@@ -201,4 +290,5 @@ __attribute__((constructor)) static void ds5rawfix_init(void) {
     if (access(OFF_FILE, F_OK) == 0) g_disabled = 1;
     logline("[ds5rawfix] 已载入 (pid=%d)%s", (int)getpid(),
             g_disabled ? " —— 已被 /tmp/ds5rawfix.off 停用" : "");
+    if (!g_disabled) install_hook();
 }
