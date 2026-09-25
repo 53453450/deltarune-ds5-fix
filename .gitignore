@@ -2,11 +2,6 @@
 .DS_Store
 ._*
 
-# 本地备份（含原始已签名二进制，体积大且不应入库）
-backup-*/
-*.bak
-*.bak.*
-
 # Python
 __pycache__/
 *.py[cod]

@@ -25,7 +25,7 @@
 //                  bit4=Create bit5=Options bit6=L3 bit7=R3
 //   [11] buttons2: bit0=PS bit1=触摸板 bit2=Mute
 //
-// 应急开关：创建 /tmp/ds5rawfix.off 即停用。日志：/tmp/ds5rawfix.log
+// 诊断日志：/tmp/ds5rawfix.log（每次启动覆盖写，上限约 300 行）
 
 #include <IOKit/hid/IOHIDDevice.h>
 #include <IOKit/hid/IOHIDElement.h>
@@ -313,6 +313,6 @@ DYLD_INTERPOSE(my_IOHIDDeviceRegisterInputValueCallback,
 __attribute__((constructor)) static void ds5rawfix_init(void) {
     if (access(OFF_FILE, F_OK) == 0) g_disabled = 1;
     logline("[ds5rawfix] 已载入 (pid=%d)%s", (int)getpid(),
-            g_disabled ? " —— 已被 /tmp/ds5rawfix.off 停用" : "");
+            g_disabled ? " —— 已被应急开关停用" : "");
     if (!g_disabled) install_hook();
 }

@@ -47,11 +47,6 @@ esac
 [[ -f "$SRC" ]] || { echo "找不到源文件: $SRC" >&2; exit 1; }
 [[ -d "$DEST_DIR" ]] || mkdir -p "$DEST_DIR"
 
-if [[ -f "$DEST" ]]; then
-  backup="$DEST.bak.$(date +%Y%m%d%H%M%S)"
-  cp "$DEST" "$backup"
-  echo "已备份原文件 -> $backup"
-fi
 
 cp "$SRC" "$DEST"
 

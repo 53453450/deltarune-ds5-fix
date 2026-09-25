@@ -127,16 +127,15 @@ DualSense 的 HID 描述符把面键按 `□ ✕ ◯ △` 排列（UsagePage `0x
     # 3. 整个 app 重新 ad-hoc 签名
     codesign --force --deep -s - "DELTARUNE.app"
 
-#### 停用 / 还原
+#### 回滚
 
-| 目的 | 操作 |
+| 修的东西 | 回滚方式 |
 |---|---|
-| **临时停用** | `touch /tmp/ds5rawfix.off`（不改文件，重启游戏即失效） |
-| **彻底还原** | Steam → 库 → DELTARUNE → 属性 → 已安装文件 → **验证游戏文件完整性** |
+| 有线（`gamecontrollerdb.txt`） | `./install.sh --uninstall` |
+| 蓝牙（注入的 dylib） | Steam → 库 → DELTARUNE → 属性 → 已安装文件 → **验证游戏文件完整性** |
 
-彻底还原之所以用 Steam 验证：`Mac_Runner` 与 `libYoYoGamepad.dylib` 已被改动，
+蓝牙之所以必须走 Steam 验证：`Mac_Runner` 与 `libYoYoGamepad.dylib` 已被改动，
 Steam 会检测到哈希不符并重新下载原始文件（含原始 Developer ID 签名）。
-本地的 `backup-*` 备份目录已按要求删除，`uninstall.sh` 不再可用。
 
 #### 代价
 
@@ -214,7 +213,6 @@ Steam 会检测到哈希不符并重新下载原始文件（含原始 Developer 
         ds5rawfix.c                   桥接实现
         libDS5RawFix.dylib            编译产物（双架构）
         add_lc_load_dylib.py          给 Mach-O 插入 LC_LOAD_DYLIB
-        uninstall.sh                  从 backup-* 还原（备份已删除，保留供参考）
 
 ### 探针
 
