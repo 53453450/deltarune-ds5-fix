@@ -260,6 +260,89 @@ GUID 由 `libYoYoGamepad.dylib` 现场计算（`0x4bed`–`0x4cb6`）：
 
 ---
 
+## 7. 蓝牙专章：为什么蓝牙下完全没有响应
+
+### 7.1 结论
+
+故障点在 **GameMaker 运行时进程内部**，且是**蓝牙专有**。系统侧、驱动侧、设备侧全部正常。
+
+### 7.2 已排除（全部为实测，非推断）
+
+| 假设 | 实测 | 结论 |
+|---|---|---|
+| 蓝牙没连上 | `Services: 0x800020 <HID ACL>`，USB 树为空 | ✗ |
+| IOKit 匹配不到设备 | 用运行时同款匹配字典 `{1,4}/{1,5}/{1,8}` 写探针 → 匹配 1 台 | ✗ |
+| 设备打不开 | `IOHIDDeviceOpen -> 0x0`，Button 元素 14 个 | ✗ |
+| 输入通路死了 | `vendor 页` 事件稳定 ~64 次/秒 | ✗ |
+| vendor 页元素挤占索引 | 运行时只认 `type∈{1,2,3}` ∧ `page∈1..12`，vendor 页一律丢弃 | ✗ |
+| 计数与填充两趟不一致 | `CountHIDElements` 与 `CollectHIDElements` 过滤规则**逐指令一致** | ✗ |
+| 按钮索引空间不同 | 蓝牙与 USB 都是 14 个按钮、usage 顺序 1..14 | ✗ |
+| 运行时的 IOKit 调用顺序有竞态 | A/B 在**各自独立进程**中复现 canonical 与 runner 两种顺序，**都能拿到设备** | ✗ |
+| 游戏崩溃 | `~/Library/Logs/DiagnosticReports` 无 DELTARUNE/Mac_Runner 记录 | ✗ |
+| 我们加的 gamecontrollerdb.txt | 用户实测：有无该文件表现一致 | ✗ |
+| 系统/驱动层问题 | 同期另一款游戏（Control）蓝牙下操作正常 | ✗ |
+
+### 7.3 实测到的真实差异
+
+| | USB | 蓝牙 |
+|---|---|---|
+| IOKit 设备类 | `AppleUserHIDDevice` | **`IOHIDUserDevice`** |
+| Transport | USB | Bluetooth |
+| `DeviceUsagePairs` | `{1,5}` | `{1,5}`（相同）|
+| 元素总数 / 按钮 | 123 / 14 | 132 / 14 |
+| 轴顺序 | `X Y Z Rz Rx Ry Hat` | **`X Y Z Rz Hat Rx Ry`** |
+
+轴顺序差异只会毁掉右摇杆，**解释不了按钮全灭**。
+
+### 7.4 关键待确认点（唯一未闭合的环节）
+
+300 秒监听窗口内：**按钮事件 0 条**，vendor 页事件 19130 条（~64/秒）。
+
+也就是说：**上报在流，但没有任何一个按钮元素的 value 变化被送达第三方 HID 客户端。**
+
+一个能解释全部现象的假设：
+
+- **SDL / HIDAPI 系（Control）读的是「原始输入报文」**（`IOHIDDeviceRegisterInputReportCallback` 路径），因此蓝牙下正常
+- **GameMaker 运行时读的是「元素值回调」**（`IOHIDDeviceRegisterInputValueCallback`），
+  而 macOS 为蓝牙 DualSense 创建的 `IOHIDUserDevice` 桥接层**只把部分元素（那个 vendor 计数器）接到了报文上，按钮元素没接**
+- USB 下设备是内核态 `AppleUserHIDDevice`，元素与报文正常对应 → 所以 USB 能用
+
+**验证方法**（需要人实际按键，静止态测不出）：
+
+```
+cd /tmp && ./hidbtn 60
+```
+
+运行后逐个按键，观察是否打印 `按钮 usage=N -> 1`。
+
+- **有按钮事件** → 上述假设不成立，锅回到运行时内部逻辑，改走 Steam Input
+- **无按钮事件** → 假设成立，属于 macOS 蓝牙 HID 桥接层对元素值回调受限，**游戏侧无论怎么改映射都无效**
+
+### 7.5 可行的修复方向
+
+两种结果**指向同一个修法**：把物理蓝牙设备换成 Steam 的虚拟手柄，绕开整条 `IOHIDUserDevice` 路径。
+
+`localconfig.vdf` → `apps` → `1671210` → `UseSteamControllerConfig` 由 `0`（Forced Off）改为 `1`（Force On），
+或在 Steam GUI：库 → DELTARUNE → 属性 → 控制器 → 强制开启。
+
+理由是 GameMaker 的内嵌映射表里**本来就有 `Steam Virtual GamePad` 条目且映射正确**
+（`030000005e0400008e02000001000000`, `a:b0,b:b1,x:b2,y:b3`），而虚拟手柄是内核态设备，不走蓝牙桥接。
+
+注意：改 `localconfig.vdf` 前必须完全退出 Steam，否则会被覆写。
+
+### 7.6 复现用的探针
+
+| 文件 | 用途 |
+|---|---|
+| `hidprobe.c` | 匹配 + `IOHIDDeviceOpen` + 按钮元素计数 |
+| `hidprobe2.c` | 输入通路存活判定（元素值快照对比） |
+| `hidlist.c` | 导出「运行时视角」的元素索引表（按 type/page 过滤） |
+| `hidorder.c` | A/B 复现运行时的 IOKit 调用顺序 |
+| `hidbtn.c` | 按钮/轴事件记录（判定事件是否送达第三方进程） |
+
+
+---
+
 ## 附：环境快照
 
 | 项 | 值 |
