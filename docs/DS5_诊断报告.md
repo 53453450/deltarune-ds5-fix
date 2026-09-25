@@ -264,7 +264,11 @@ GUID 由 `libYoYoGamepad.dylib` 现场计算（`0x4bed`–`0x4cb6`）：
 
 ### 7.1 结论
 
-故障点在 **GameMaker 运行时进程内部**，且是**蓝牙专有**。系统侧、驱动侧、设备侧全部正常。
+**蓝牙下 macOS 重发布的 `IOHIDUserDevice` 把面键声明在 Report ID 1，而蓝牙链路实际上行的是
+Report ID 49（0x31）——按键元素的值永不更新，元素值回调一次都不触发。**
+
+GameMaker 运行时只用元素值回调，因此在蓝牙下彻底收不到输入；这是 **macOS 蓝牙 HID 桥接层的
+报文绑定缺陷，游戏侧无解**（改映射文件无效）。系统侧、驱动侧、设备侧本身全部正常。
 
 ### 7.2 已排除（全部为实测，非推断）
 
@@ -294,41 +298,52 @@ GUID 由 `libYoYoGamepad.dylib` 现场计算（`0x4bed`–`0x4cb6`）：
 
 轴顺序差异只会毁掉右摇杆，**解释不了按钮全灭**。
 
-### 7.4 关键待确认点（唯一未闭合的环节）
+### 7.4 根因（已确认）
 
-300 秒监听窗口内：**按钮事件 0 条**，vendor 页事件 19130 条（~64/秒）。
+实测判据：按键时 `hidbtn` 探针**零输出**，而同窗口 vendor 页事件 19130 条（~64/秒）。
+即：**上报在流，但按钮元素的 value 从不变化。**
 
-也就是说：**上报在流，但没有任何一个按钮元素的 value 变化被送达第三方 HID 客户端。**
+比对两种传输方式的 HID 描述符与输入报文绑定：
 
-一个能解释全部现象的假设：
+| | USB | 蓝牙 |
+|---|---|---|
+| IOKit 类 | `AppleUserHIDDevice` | `IOHIDUserDevice` |
+| `ReportDescriptor` | 289 字节 | 320 字节 |
+| 描述符声明的 Report ID | `[1, 2, 5, 8, 9, 10, 11, 12, 32, 33, 34, …]` | `[1, **49**, 50, 51, 52, 53, 54, 55, 56, 57, 5, 8, …]` |
+| 按钮 1..N 声明所在 Report | **Report ID 1** | **Report ID 1** |
+| `InputReportElements` 里 Report 1 的尺寸 | **512 bit**（64 字节，完整） | **80 bit**（10 字节，桩） |
+| 实际链路上行的报文 | Report 1 | **Report 49（0x31，624 bit / 78 字节）** |
 
-- **SDL / HIDAPI 系（Control）读的是「原始输入报文」**（`IOHIDDeviceRegisterInputReportCallback` 路径），因此蓝牙下正常
-- **GameMaker 运行时读的是「元素值回调」**（`IOHIDDeviceRegisterInputValueCallback`），
-  而 macOS 为蓝牙 DualSense 创建的 `IOHIDUserDevice` 桥接层**只把部分元素（那个 vendor 计数器）接到了报文上，按钮元素没接**
-- USB 下设备是内核态 `AppleUserHIDDevice`，元素与报文正常对应 → 所以 USB 能用
+**机制**：
 
-**验证方法**（需要人实际按键，静止态测不出）：
+1. 蓝牙下 macOS 把物理设备重发布成一个用户态 `IOHIDUserDevice`；
+2. 该描述符把面键声明在 **Report ID 1**，但这条 report 只有 80 bit 的桩，**蓝牙链路从不发送它**；
+3. 链路实际发送的是 **Report ID 49（0x31）**；
+4. 于是按键元素的值**永远得不到更新**（恒为 0）→ `IOHIDDeviceRegisterInputValueCallback` **一次都不触发**；
+5. 唯一在变的是 `page=0xFF00 usage=59` 那个自增计数器元素 —— 它被绑定在 Report 49 上，所以能更新。
 
-```
-cd /tmp && ./hidbtn 60
-```
+这解释了全部现象：
 
-运行后逐个按键，观察是否打印 `按钮 usage=N -> 1`。
+- **USB 正常**：`InputReportElements` 里 Report 1 是 512 bit 的完整报文，元素与实际上报对齐
+- **Control 蓝牙正常**：SDL / HIDAPI 读的是**原始输入报文**（自己解析 report 49 的字节），不依赖元素值回调
+- **DELTARUNE 蓝牙失聪**：`libYoYoGamepad.dylib` 的符号表里**没有** `IOHIDDeviceRegisterInputReportCallback`，
+  它**只用元素值回调**（且从不调用 `IOHIDDeviceOpen`，完全依赖 `IOHIDManagerOpen` 代管）
+- **改映射文件无效**：映射只重排索引，改变不了「元素值根本不更新」这件事
 
-- **有按钮事件** → 上述假设不成立，锅回到运行时内部逻辑，改走 Steam Input
-- **无按钮事件** → 假设成立，属于 macOS 蓝牙 HID 桥接层对元素值回调受限，**游戏侧无论怎么改映射都无效**
+结论：**这是 macOS 蓝牙 HID 桥接层的报文绑定缺陷，游戏侧无解。**
 
 ### 7.5 可行的修复方向
 
-两种结果**指向同一个修法**：把物理蓝牙设备换成 Steam 的虚拟手柄，绕开整条 `IOHIDUserDevice` 路径。
+游戏侧无解（元素值回调根本收不到数据），只能从**让游戏看到一个健康的 HID 设备**入手：
 
-`localconfig.vdf` → `apps` → `1671210` → `UseSteamControllerConfig` 由 `0`（Forced Off）改为 `1`（Force On），
-或在 Steam GUI：库 → DELTARUNE → 属性 → 控制器 → 强制开启。
+| 方案 | 做法 | 评价 |
+|---|---|---|
+| **A. 用有线** | 直接插线 | 已验证可用。最稳，代价是占用一个 USB 口 |
+| **B. Steam Input 强制开启** | `localconfig.vdf` → `apps` → `1671210` → `UseSteamControllerConfig` 由 `0` 改 `1`（**改前必须完全退出 Steam**），或 GUI：库 → DELTARUNE → 属性 → 控制器 → 强制开启 | GameMaker 内嵌映射表里**本就有 `Steam Virtual GamePad` 且映射正确**（`030000005e0400008e02000001000000`, `a:b0,b:b1,x:b2,y:b3`）。虚拟手柄由 Steam 自己造，报文与元素对齐，绕开整条蓝牙桥接 |
+| C. 等 Apple 修 | — | 这是 macOS 侧缺陷，非 Valve / 非 Toby Fox 的问题 |
 
-理由是 GameMaker 的内嵌映射表里**本来就有 `Steam Virtual GamePad` 条目且映射正确**
-（`030000005e0400008e02000001000000`, `a:b0,b:b1,x:b2,y:b3`），而虚拟手柄是内核态设备，不走蓝牙桥接。
-
-注意：改 `localconfig.vdf` 前必须完全退出 Steam，否则会被覆写。
+方案 B 有一个已知风险：macOS 上 Steam Input 未必对游戏隐藏物理设备，游戏可能同时看到
+「物理 DualSense」与「虚拟手柄」两台设备，槽位分配顺序不确定。若出现该情况，回退到方案 A。
 
 ### 7.6 复现用的探针
 
@@ -338,7 +353,8 @@ cd /tmp && ./hidbtn 60
 | `hidprobe2.c` | 输入通路存活判定（元素值快照对比） |
 | `hidlist.c` | 导出「运行时视角」的元素索引表（按 type/page 过滤） |
 | `hidorder.c` | A/B 复现运行时的 IOKit 调用顺序 |
-| `hidbtn.c` | 按钮/轴事件记录（判定事件是否送达第三方进程） |
+| `hidbtn.c` | 按钮/轴事件记录（判定事件是否送达第三方进程）——**本案的定案证据** |
+| `tools/hid_report_binding.py`（仓库内） | 一键排查「元素声明在哪条 report vs 链路实际上行哪条 report」的错配 |
 
 
 ---

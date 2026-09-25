@@ -81,6 +81,7 @@ DualSense 的 HID 描述符把面键按 `□ ✕ ◯ △` 排列（UsagePage `0x
     install.sh                    安装 / 回滚到存档目录
     docs/DS5_诊断报告.md          完整取证报告（证据链 + 反汇编片段 + 第 7 章蓝牙专章）
     tools/find_xref.py            反汇编 rip-relative 交叉引用查找器（按内容匹配定位字符串引用）
+    tools/hid_report_binding.py   HID 元素/报文绑定诊断（一键查出蓝牙那类错配）
     tools/probes/                 复现探针源码（见下）
 
 ### 探针
@@ -104,24 +105,33 @@ DualSense 的 HID 描述符把面键按 `□ ✕ ◯ △` 排列（UsagePage `0x
   `Developer ID Application: Robert Fox (UY9XU99VUC)`，Hardened Runtime + 公证已 staple
 - 映射表规模：156 条 `platform:Mac OS X`；Sony 条目 4 条（PS3 / PS4 v1 / DS4 v2 / DS4 无线适配器），DualSense 0 条
 
-## 未验证 / 已知缺口
+## 已知缺口：蓝牙下完全没有响应（根因已定位，详见 `docs/DS5_诊断报告.md` 第 7 章）
 
-### 蓝牙下完全没有响应（详见 `docs/DS5_诊断报告.md` 第 7 章）
+**根因**：蓝牙下 macOS 把 DualSense 重发布成用户态 `IOHIDUserDevice`，其描述符把面键声明在
+**Report ID 1**，而蓝牙链路实际上行的是 **Report ID 49（0x31）**。按键元素绑在一条永远不会被
+发送的 report 上 → 值恒为 0 → `IOHIDDeviceRegisterInputValueCallback` 一次都不触发。
 
-系统侧已全面排除：设备匹配、打开、上报、元素索引空间、计数与填充一致性、运行时 IOKit 调用
-顺序竞态、崩溃报告、本补丁文件的影响——**全部实测否掉**；同期另一款游戏（Control）蓝牙下操作正常。
+| | USB | 蓝牙 |
+|---|---|---|
+| IOKit 类 | `AppleUserHIDDevice` | `IOHIDUserDevice` |
+| 按钮声明在 | Report ID 1 | Report ID 1 |
+| `InputReportElements` 中 Report 1 尺寸 | **512 bit（完整）** | **80 bit（桩）** |
+| 链路实际上行报文 | Report 1 | **Report 49（624 bit）** |
 
-300 秒监听窗口的实测结果：**按钮事件 0 条**，vendor 页事件 19130 条（~64/秒）。
-即上报在流，但没有按钮元素的 value 变化送达第三方 HID 客户端。
+这解释了为什么：
 
-待验证假设：HIDAPI 系游戏读**原始输入报文**，GameMaker 运行时读**元素值回调**，
-而 macOS 为蓝牙 DualSense 创建的 `IOHIDUserDevice` 桥接层可能只接了部分元素。
+- **USB 正常**——Report 1 是完整报文，元素与上报对齐
+- **同期的 Control 蓝牙正常**——SDL/HIDAPI 读**原始报文**自己解析，不依赖元素值回调
+- **改本仓库的映射文件无效**——映射只重排索引，改变不了「元素值根本不更新」
 
-验证命令（需实际按键）：
+一键排查（自行抓取 ioreg 或指定 dump）：
 
-    ./hidbtn 60
+    ./tools/hid_report_binding.py --device DualSense
 
-### 其他
+**结论：这是 macOS 蓝牙 HID 桥接层的缺陷，游戏侧无解。**
+可行路径只有两条：换有线，或让游戏看到一个由 Steam 生成的虚拟手柄（Steam Input 强制开启）。
+
+### 其他未验证
 
 - macOS 上若改用 Steam Input 虚拟手柄（`Steam Virtual GamePad`），该条目在运行时映射表中**已存在且正确**
   （`030000005e0400008e02000001000000`, `a:b0,b:b1,x:b2,y:b3`），但本补丁与其叠加时的行为未测。
